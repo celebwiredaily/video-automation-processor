@@ -1,0 +1,105 @@
+name: Video Processing
+
+on:
+  repository_dispatch:
+    types: [process-video]
+  workflow_dispatch:
+    inputs:
+      video_title:
+        description: 'Video title'
+        required: true
+        default: 'Untitled Video'
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+      
+      - name: Install video processing tools
+        run: |
+          npm install -g editly
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg imagemagick
+      
+      - name: Create editly config
+        run: |
+          cat > config.json << 'EOF'
+          {
+            "outPath": "output.mp4",
+            "width": 1920,
+            "height": 1080,
+            "fps": 30,
+            "audioFilePath": "${{ github.event.client_payload.audio_url || '' }}",
+            "clips": [
+              {
+                "duration": 5,
+                "layers": [
+                  {
+                    "type": "title",
+                    "text": "${{ github.event.client_payload.title || inputs.video_title }}",
+                    "fontFamily": "Arial",
+                    "fontSize": 100
+                  }
+                ]
+              }
+            ]
+          }
+          EOF
+      
+      - name: Generate video with editly
+        run: editly config.json
+      
+      - name: Get video metadata
+        id: metadata
+        run: |
+          SIZE=$(du -h output.mp4 | cut -f1)
+          DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 output.mp4)
+          echo "size=$SIZE" >> $GITHUB_OUTPUT
+          echo "duration=$DURATION" >> $GITHUB_OUTPUT
+      
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v1
+        id: release
+        with:
+          tag_name: video-${{ github.run_number }}
+          name: ${{ github.event.client_payload.title || inputs.video_title }}
+          files: output.mp4
+          body: |
+            **Video Information**
+            - Title: ${{ github.event.client_payload.title || inputs.video_title }}
+            - Size: ${{ steps.metadata.outputs.size }}
+            - Duration: ${{ steps.metadata.outputs.duration }}s
+            - Generated: ${{ github.event.repository.updated_at }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Get download URL
+        id: get_url
+        run: |
+          sleep 5
+          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/video-${{ github.run_number }}/output.mp4"
+          echo "url=$DOWNLOAD_URL" >> $GITHUB_OUTPUT
+          echo "Download URL: $DOWNLOAD_URL"
+      
+      - name: Notify n8n webhook
+        if: ${{ github.event.client_payload.callback_url }}
+        run: |
+          curl -X POST "${{ github.event.client_payload.callback_url }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "status": "success",
+              "video_url": "${{ steps.get_url.outputs.url }}",
+              "title": "${{ github.event.client_payload.title || inputs.video_title }}",
+              "size": "${{ steps.metadata.outputs.size }}",
+              "duration": "${{ steps.metadata.outputs.duration }}",
+              "release_tag": "video-${{ github.run_number }}"
+            }'
