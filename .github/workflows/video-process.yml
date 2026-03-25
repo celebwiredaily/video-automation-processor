@@ -47,7 +47,7 @@ jobs:
         with:
           node-version: '18'
       
-      # Step 4: Install system dependencies
+      # Step 4: Install system dependencies (FIXED)
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -55,7 +55,7 @@ jobs:
             fonts-liberation \
             fonts-dejavu-core \
             ffmpeg \
-            libgl1-mesa-glx \
+            libgl1 \
             libglib2.0-0
       
       # Step 5: Install Python packages
