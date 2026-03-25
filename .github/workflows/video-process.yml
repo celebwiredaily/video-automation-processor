@@ -1,105 +1,199 @@
-name: Video Processing
+name: Pinterest to Video Render
 
 on:
-  repository_dispatch:
-    types: [process-video]
   workflow_dispatch:
     inputs:
-      video_title:
-        description: 'Video title'
+      search_query:
+        description: 'Pinterest search keywords (comma-separated)'
         required: true
-        default: 'Untitled Video'
+        type: string
+      num_images:
+        description: 'Number of images to download'
+        required: false
+        default: '100'
+        type: string
+      script_text:
+        description: 'Full video script for voiceover'
+        required: true
+        type: string
+      callback_url:
+        description: 'ActivePieces webhook URL for completion signal'
+        required: true
+        type: string
+      job_id:
+        description: 'Unique job identifier'
+        required: true
+        type: string
 
 jobs:
-  process:
+  render_video:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 360  # 6 hours max
     
     steps:
+      # Step 1: Checkout repository code
       - name: Checkout repository
         uses: actions/checkout@v3
       
-      - name: Setup Node.js
+      # Step 2: Set up Python environment
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      
+      # Step 3: Set up Node.js for Editly
+      - name: Set up Node.js
         uses: actions/setup-node@v3
         with:
           node-version: '18'
       
-      - name: Install video processing tools
+      # Step 4: Install system dependencies
+      - name: Install system dependencies
         run: |
-          npm install -g editly
           sudo apt-get update
-          sudo apt-get install -y ffmpeg imagemagick
+          sudo apt-get install -y \
+            fonts-liberation \
+            fonts-dejavu-core \
+            ffmpeg \
+            libgl1-mesa-glx \
+            libglib2.0-0
       
-      - name: Create editly config
+      # Step 5: Install Python packages
+      - name: Install Python dependencies
         run: |
-          cat > config.json << 'EOF'
-          {
-            "outPath": "output.mp4",
-            "width": 1920,
-            "height": 1080,
-            "fps": 30,
-            "audioFilePath": "${{ github.event.client_payload.audio_url || '' }}",
-            "clips": [
-              {
-                "duration": 5,
-                "layers": [
-                  {
-                    "type": "title",
-                    "text": "${{ github.event.client_payload.title || inputs.video_title }}",
-                    "fontFamily": "Arial",
-                    "fontSize": 100
-                  }
-                ]
-              }
-            ]
-          }
-          EOF
+          pip install --upgrade pip
+          pip install -r requirements.txt
       
-      - name: Generate video with editly
-        run: editly config.json
+      # Step 6: Install Editly (video editor)
+      - name: Install Editly
+        run: npm install -g editly
       
-      - name: Get video metadata
-        id: metadata
+      # Step 7: Generate voiceover using Edge-TTS (FREE)
+      - name: Generate voiceover with Edge-TTS
         run: |
-          SIZE=$(du -h output.mp4 | cut -f1)
-          DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 output.mp4)
-          echo "size=$SIZE" >> $GITHUB_OUTPUT
-          echo "duration=$DURATION" >> $GITHUB_OUTPUT
+          pip install edge-tts
+          echo '${{ github.event.inputs.script_text }}' > script.txt
+          edge-tts \
+            --voice en-US-AriaNeural \
+            --rate=-5% \
+            --file script.txt \
+            --write-media voiceover.mp3
+          
+          # Verify audio was created
+          if [ ! -f voiceover.mp3 ]; then
+            echo "Error: Voiceover generation failed"
+            exit 1
+          fi
+          
+          # Show audio duration
+          ffprobe -v error -show_entries format=duration \
+            -of default=noprint_wrappers=1:nokey=1 voiceover.mp3
       
-      - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@v1
-        id: release
-        with:
-          tag_name: video-${{ github.run_number }}
-          name: ${{ github.event.client_payload.title || inputs.video_title }}
-          files: output.mp4
-          body: |
-            **Video Information**
-            - Title: ${{ github.event.client_payload.title || inputs.video_title }}
-            - Size: ${{ steps.metadata.outputs.size }}
-            - Duration: ${{ steps.metadata.outputs.duration }}s
-            - Generated: ${{ github.event.repository.updated_at }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      
-      - name: Get download URL
-        id: get_url
+      # Step 8: Update main.py with workflow inputs
+      - name: Configure scraper settings
         run: |
-          sleep 5
-          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/video-${{ github.run_number }}/output.mp4"
-          echo "url=$DOWNLOAD_URL" >> $GITHUB_OUTPUT
-          echo "Download URL: $DOWNLOAD_URL"
+          sed -i 's/SEARCH_QUERY = .*/SEARCH_QUERY = "${{ github.event.inputs.search_query }}"/' main.py
+          sed -i 's/NUM_IMAGES = .*/NUM_IMAGES = ${{ github.event.inputs.num_images }}/' main.py
       
-      - name: Notify n8n webhook
-        if: ${{ github.event.client_payload.callback_url }}
+      # Step 9: Download images from Pinterest
+      - name: Download Pinterest images
         run: |
-          curl -X POST "${{ github.event.client_payload.callback_url }}" \
+          python main.py download
+          
+          # Verify downloads exist
+          if [ ! -d "raw_downloads" ] || [ -z "$(ls -A raw_downloads)" ]; then
+            echo "Error: No images downloaded"
+            exit 1
+          fi
+          
+          echo "Downloaded $(ls raw_downloads | wc -l) images"
+      
+      # Step 10: Filter images (face detection + watermark removal)
+      - name: Filter images
+        run: |
+          python main.py filter
+          
+          # Verify filtered images exist
+          if [ ! -d "filtered_images" ] || [ -z "$(ls -A filtered_images)" ]; then
+            echo "Error: No images passed filters"
+            exit 1
+          fi
+          
+          FILTERED_COUNT=$(ls filtered_images | wc -l)
+          echo "Filtered images: $FILTERED_COUNT"
+          
+          if [ $FILTERED_COUNT -lt 50 ]; then
+            echo "Warning: Only $FILTERED_COUNT images passed filters (need at least 50)"
+            exit 1
+          fi
+      
+      # Step 11: Generate Editly config
+      - name: Create video configuration
+        run: python main.py config
+      
+      # Step 12: Render video with Editly
+      - name: Render video
+        run: |
+          echo "Starting video render..."
+          editly config.json --verbose
+          
+          # Verify output exists
+          if [ ! -f output.mp4 ]; then
+            echo "Error: Video rendering failed"
+            exit 1
+          fi
+          
+          # Show video info
+          ffprobe -v error -show_entries format=duration,size \
+            -of default=noprint_wrappers=1 output.mp4
+      
+      # Step 13: Upload video to transfer.sh (temporary hosting)
+      - name: Upload video to transfer.sh
+        id: upload
+        run: |
+          echo "Uploading video..."
+          UPLOAD_URL=$(curl --upload-file output.mp4 https://transfer.sh/video_${{ github.event.inputs.job_id }}.mp4)
+          echo "video_url=$UPLOAD_URL" >> $GITHUB_OUTPUT
+          echo "Video URL: $UPLOAD_URL"
+      
+      # Step 14: Send SUCCESS callback to ActivePieces
+      - name: Send success signal
+        if: success()
+        run: |
+          curl -X POST "${{ github.event.inputs.callback_url }}" \
             -H "Content-Type: application/json" \
             -d '{
               "status": "success",
-              "video_url": "${{ steps.get_url.outputs.url }}",
-              "title": "${{ github.event.client_payload.title || inputs.video_title }}",
-              "size": "${{ steps.metadata.outputs.size }}",
-              "duration": "${{ steps.metadata.outputs.duration }}",
-              "release_tag": "video-${{ github.run_number }}"
+              "job_id": "${{ github.event.inputs.job_id }}",
+              "video_url": "${{ steps.upload.outputs.video_url }}",
+              "run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
+              "search_query": "${{ github.event.inputs.search_query }}",
+              "images_filtered": "'$(ls filtered_images 2>/dev/null | wc -l)'",
+              "timestamp": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"
             }'
+      
+      # Step 15: Send FAILURE callback to ActivePieces
+      - name: Send failure signal
+        if: failure()
+        run: |
+          curl -X POST "${{ github.event.inputs.callback_url }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "status": "failed",
+              "job_id": "${{ github.event.inputs.job_id }}",
+              "run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
+              "error": "GitHub Actions workflow failed - check logs at run_url",
+              "timestamp": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"
+            }'
+      
+      # Step 16: Upload artifacts (backup in case transfer.sh fails)
+      - name: Upload video artifact
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: video-${{ github.event.inputs.job_id }}
+          path: |
+            output.mp4
+            config.json
+            voiceover.mp3
+          retention-days: 7
