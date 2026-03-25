@@ -31,44 +31,37 @@ jobs:
     timeout-minutes: 360  # 6 hours max
     
     steps:
-      # Step 1: Checkout repository code
-      - name: Checkout repository
-        uses: actions/checkout@v3
-      
-      # Step 2: Set up Python environment
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
-      
-      # Step 3: Set up Node.js for Editly
-      - name: Set up Node.js
-        uses: actions/setup-node@v3
-        with:
-          node-version: '18'
-      
-      # Step 4: Install system dependencies (FIXED)
+       # Step 4: Install system dependencies (COMPLETE FIX)
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
+            build-essential \
+            python3 \
+            pkg-config \
+            libxi-dev \
+            libglu1-mesa-dev \
+            libglew-dev \
+            xvfb \
             fonts-liberation \
             fonts-dejavu-core \
             ffmpeg \
             libgl1 \
             libglib2.0-0
       
-      # Step 5: Install Python packages
+      # Step 5: Install Python dependencies
       - name: Install Python dependencies
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
       
-      # Step 6: Install Editly (video editor)
+      # Step 6: Install Editly (should work now with build deps)
       - name: Install Editly
         run: npm install -g editly
+        env:
+          npm_config_build_from_source: true
       
-      # Step 7: Generate voiceover using Edge-TTS (FREE)
+      # Step 7: Generate voiceover with Edge-TTS
       - name: Generate voiceover with Edge-TTS
         run: |
           pip install edge-tts
@@ -79,28 +72,25 @@ jobs:
             --file script.txt \
             --write-media voiceover.mp3
           
-          # Verify audio was created
           if [ ! -f voiceover.mp3 ]; then
             echo "Error: Voiceover generation failed"
             exit 1
           fi
           
-          # Show audio duration
           ffprobe -v error -show_entries format=duration \
             -of default=noprint_wrappers=1:nokey=1 voiceover.mp3
       
-      # Step 8: Update main.py with workflow inputs
+      # Step 8: Configure scraper settings
       - name: Configure scraper settings
         run: |
           sed -i 's/SEARCH_QUERY = .*/SEARCH_QUERY = "${{ github.event.inputs.search_query }}"/' main.py
           sed -i 's/NUM_IMAGES = .*/NUM_IMAGES = ${{ github.event.inputs.num_images }}/' main.py
       
-      # Step 9: Download images from Pinterest
+      # Step 9: Download Pinterest images
       - name: Download Pinterest images
         run: |
           python main.py download
           
-          # Verify downloads exist
           if [ ! -d "raw_downloads" ] || [ -z "$(ls -A raw_downloads)" ]; then
             echo "Error: No images downloaded"
             exit 1
@@ -108,12 +98,11 @@ jobs:
           
           echo "Downloaded $(ls raw_downloads | wc -l) images"
       
-      # Step 10: Filter images (face detection + watermark removal)
+      # Step 10: Filter images
       - name: Filter images
         run: |
           python main.py filter
           
-          # Verify filtered images exist
           if [ ! -d "filtered_images" ] || [ -z "$(ls -A filtered_images)" ]; then
             echo "Error: No images passed filters"
             exit 1
@@ -131,22 +120,20 @@ jobs:
       - name: Create video configuration
         run: python main.py config
       
-      # Step 12: Render video with Editly
+      # Step 12: Render video with Editly (Headless Mode)
       - name: Render video
         run: |
           echo "Starting video render..."
-          editly config.json --verbose
+          xvfb-run -a editly config.json --verbose
           
-          # Verify output exists
           if [ ! -f output.mp4 ]; then
             echo "Error: Video rendering failed"
             exit 1
           fi
           
-          # Show video info
           ffprobe -v error -show_entries format=duration,size \
             -of default=noprint_wrappers=1 output.mp4
-      
+            
       # Step 13: Upload video to transfer.sh (temporary hosting)
       - name: Upload video to transfer.sh
         id: upload
