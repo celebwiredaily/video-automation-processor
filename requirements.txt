@@ -1,5 +1,0 @@
-pinterest-dl==1.1.2
-mediapipe==0.10.9
-opencv-python-headless==4.8.1.78
-Pillow==10.1.0
-numpy==1.24.3
