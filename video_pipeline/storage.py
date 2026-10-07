@@ -269,6 +269,15 @@ class GoogleDriveStorage(Storage):
     name = "google_drive"
     supports_upload = True
 
+    # Seam for tests: constructing the upload payload is the only part of the
+    # upload path that needs googleapiclient installed, so it is isolated here.
+    # Everything the tests care about - policy, verification, error
+    # classification - runs without the optional dependency. The default is
+    # resolved lazily because the helper is defined further down this module.
+    media_body_factory = staticmethod(
+        lambda source, mime: _drive_media_body(source, mime)
+    )
+
     def __init__(
         self,
         folder: str,
@@ -294,16 +303,8 @@ class GoogleDriveStorage(Storage):
     # ------------------------------------------------------------- discovery
 
     def _build_service(self, write: bool):
-        try:
-            from googleapiclient.discovery import build  # type: ignore
-            from google.oauth2.service_account import Credentials  # type: ignore
-        except ImportError as exc:
-            raise AssetError(
-                "Authenticated Google Drive access needs extra dependencies.",
-                detail="pip install google-api-python-client google-auth google-auth-httplib2",
-                cause=str(exc),
-            ) from exc
-
+        # Check the credentials path before importing the client libraries: a
+        # wrong path is more actionable than "module not installed".
         if not self.credentials_file:
             raise AssetError(
                 "Google Drive upload requires authenticated access."
@@ -319,6 +320,16 @@ class GoogleDriveStorage(Storage):
                 path=str(self.credentials_file),
                 hint="Set GOOGLE_DRIVE_CREDENTIALS to a readable JSON file.",
             )
+
+        try:
+            from googleapiclient.discovery import build  # type: ignore
+            from google.oauth2.service_account import Credentials  # type: ignore
+        except ImportError as exc:
+            raise AssetError(
+                "Authenticated Google Drive access needs extra dependencies.",
+                detail="pip install google-api-python-client google-auth google-auth-httplib2",
+                cause=str(exc),
+            ) from exc
 
         # Write access needs the full drive scope; readonly is not enough.
         scope = (
@@ -415,7 +426,7 @@ class GoogleDriveStorage(Storage):
             except Exception as exc:  # noqa: BLE001
                 raise self._classify_upload_error(exc) from exc
 
-        media_body = _drive_media_body(source, mime_type)
+        media_body = self.media_body_factory(source, mime_type)
 
         try:
             if existing:

@@ -152,8 +152,24 @@ class FakeDrive:
         return self._files
 
 
+class FakeMediaBody:
+    """Stand-in for MediaFileUpload; the fake records size/mime separately."""
+
+    def __init__(self, path, mimetype=None):
+        self.path = str(path)
+        self.mimetype = mimetype
+
+
 class UploadStorage(GoogleDriveStorage):
-    """GoogleDriveStorage with the auth + media body stubbed out."""
+    """GoogleDriveStorage with auth and the media body stubbed out.
+
+    Uses the injected media_body_factory seam, so these tests need no
+    googleapiclient install - which is exactly how normal CI runs them.
+    """
+
+    media_body_factory = staticmethod(
+        lambda source, mime: FakeMediaBody(source, mime)
+    )
 
     def __init__(self, drive: FakeDrive, *, credentials: bool = True, folder="FOLDERID0000000001"):
         super().__init__(folder, credentials_file=Path("dummy.json") if credentials else None)
