@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    paths-ignore:
+      - "**/*.md"
+      - "legacy/**"
+  pull_request:
+  workflow_dispatch:
+
+# Least privilege: this workflow only ever needs to read the repository.
+permissions:
+  contents: read
+
+# Artefact retention. Override per repository/variable if needed.
+env:
+  ARTIFACT_RETENTION_DAYS: "7"
+  ARTIFACT_NAME: final-video
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: unit + render tests (CPU)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core
+
+      - name: Install project
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install pytest
+
+      - name: Environment check
+        run: python -m video_pipeline doctor
+
+      - name: Unit tests (no media)
+        run: pytest -q tests/test_captions.py tests/test_config_timeline.py tests/test_storage.py tests/test_upload.py
+
+      - name: Render + integration tests (real MP4s, frame inspection)
+        run: pytest -q tests/test_render_integration.py tests/test_media_types.py
+
+      - name: Deterministic render test
+        run: |
+          python -m video_pipeline prepare-test build/ci-project
+          python -m video_pipeline render build/ci-project
+
+      # Validation is the gate. Staging refuses to run unless validation.json
+      # reports ok=true, so a bad render can never be published.
+      - name: Stage artifact files
+        run: |
+          python tools/stage_artifacts.py build/ci-project \
+            --artifact-dir "$RUNNER_TEMP/artifacts" \
+            --artifact-name "$ARTIFACT_NAME"
+
+      # No `if:` guard on purpose: upload-artifact only runs when every previous
+      # step succeeded, so a failed render or failed validation uploads nothing.
+      - name: Upload final-video artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ runner.temp }}/artifacts/
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+          if-no-files-found: error
+
+      - name: Artifact summary
+        if: always()
+        env:
+          PROJECT_DIR: build/ci-project
+        run: |
+          python tools/summary.py \
+            "$PROJECT_DIR/output/diagnostics/validation.json" "$PROJECT_DIR" \
+            >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failure-diagnostics
+          path: |
+            build/ci-project/output/diagnostics/
+            build/ci-project/build/logs/
+          retention-days: 7
+          if-no-files-found: ignore

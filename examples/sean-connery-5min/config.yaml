@@ -1,0 +1,23 @@
+output:
+  width: 1280
+  height: 720
+  fps: 30
+  crf: 20
+  preset: veryfast
+duration:
+  target_seconds: 300
+  min_seconds: 60
+  max_seconds: 1800
+visual:
+  default_fit: contain
+  on_short: error
+captions:
+  enabled: true
+  font_name: Montserrat
+  font_size: 46
+  primary_color: '#F7FF00'
+  outline_color: '#000000'
+  outline: 4
+  margin_v: 44
+  max_chars_per_line: 42
+  max_lines: 2

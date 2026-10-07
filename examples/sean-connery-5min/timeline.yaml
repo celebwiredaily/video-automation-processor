@@ -1,0 +1,81 @@
+timeline:
+  - start: 0.0
+    end: 18.75
+    asset: assets/broll_00.mp4
+    fit: contain
+    label: broll 00
+  - start: 18.75
+    end: 37.5
+    asset: assets/broll_01.mp4
+    fit: contain
+    label: broll 01
+  - start: 37.5
+    end: 56.25
+    asset: assets/broll_02.mp4
+    fit: contain
+    label: broll 02
+  - start: 56.25
+    end: 75.0
+    asset: assets/broll_03.mp4
+    fit: contain
+    label: broll 03
+  - start: 75.0
+    end: 93.75
+    asset: assets/still_00.jpg
+    fit: contain
+    label: still 00
+  - start: 93.75
+    end: 112.5
+    asset: assets/broll_05.mp4
+    fit: contain
+    label: broll 05
+  - start: 112.5
+    end: 131.25
+    asset: assets/broll_06.mp4
+    fit: contain
+    label: broll 06
+  - start: 131.25
+    end: 150.0
+    asset: assets/broll_07.mp4
+    fit: contain
+    label: broll 07
+  - start: 150.0
+    end: 168.75
+    asset: assets/broll_08.mp4
+    fit: contain
+    label: broll 08
+  - start: 168.75
+    end: 187.5
+    asset: assets/still_01.jpg
+    fit: contain
+    label: still 01
+  - start: 187.5
+    end: 206.25
+    asset: assets/broll_10.mp4
+    fit: contain
+    label: broll 10
+  - start: 206.25
+    end: 225.0
+    asset: assets/broll_11.mp4
+    fit: contain
+    label: broll 11
+  - start: 225.0
+    end: 243.75
+    asset: assets/broll_12.mp4
+    fit: contain
+    label: broll 12
+  - start: 243.75
+    end: 262.5
+    asset: assets/broll_13.mp4
+    fit: contain
+    label: broll 13
+  - start: 262.5
+    end: 281.25
+    asset: assets/still_02.jpg
+    fit: contain
+    label: still 02
+  - start: 281.25
+    end: 300.0
+    asset: assets/broll_15.mp4
+    fit: contain
+    label: broll 15

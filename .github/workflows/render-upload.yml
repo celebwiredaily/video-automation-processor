@@ -1,0 +1,173 @@
+name: Render and upload to Drive
+
+# Separate from CI on purpose: normal CI never requires Google credentials and
+# never contacts Drive. This workflow is the optional Drive publisher.
+on:
+  workflow_dispatch:
+    inputs:
+      project:
+        description: "Project directory under projects/ (e.g. my-video)"
+        required: true
+        type: string
+      quality:
+        description: "Render quality"
+        required: false
+        default: final
+        type: choice
+        options: [final, draft]
+      upload_to_drive:
+        description: "Also publish the validated MP4 to Google Drive"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+env:
+  ARTIFACT_RETENTION_DAYS: "7"
+  ARTIFACT_NAME: final-video
+
+concurrency:
+  group: render-upload-${{ github.event.inputs.project }}
+  cancel-in-progress: false
+
+jobs:
+  render-and-upload:
+    name: Render, validate, artifact, optional Drive upload
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core
+
+      - name: Install project
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install google-api-python-client google-auth
+
+      - name: Resolve project directory
+        id: project
+        env:
+          PROJECT_INPUT: ${{ github.event.inputs.project }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$PROJECT_INPUT" =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ ]]; then
+            echo "::error::invalid project path"
+            exit 1
+          fi
+          CANDIDATE="projects/${PROJECT_INPUT}"
+          if [[ ! -f "$CANDIDATE/project.yaml" ]]; then
+            echo "::error::$CANDIDATE/project.yaml not found"
+            echo "Available projects:"
+            ls -1 projects 2>/dev/null || echo "(none committed)"
+            exit 1
+          fi
+          echo "dir=$CANDIDATE" >> "$GITHUB_OUTPUT"
+
+      # Credentials come only from repository/environment secrets. The JSON is
+      # written to a 0600 file outside the workspace, masked, and removed when
+      # the job ends. A missing secret must NOT fail the artefact step.
+      - name: Write Drive credentials
+        id: creds
+        env:
+          DRIVE_JSON: ${{ secrets.GOOGLE_DRIVE_CREDENTIALS }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DRIVE_JSON:-}" ]; then
+            echo "::notice::GOOGLE_DRIVE_CREDENTIALS is not configured; the Drive upload step will be skipped"
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          printf '%s' "$DRIVE_JSON" > "$RUNNER_TEMP/drive.json"
+          chmod 600 "$RUNNER_TEMP/drive.json"
+          echo "::add-mask::$DRIVE_JSON"
+          echo "available=true" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch assets
+        env:
+          PROJECT_DIR: ${{ steps.project.outputs.dir }}
+        run: python -m video_pipeline fetch "$PROJECT_DIR" || true
+
+      - name: Render and validate
+        env:
+          PROJECT_DIR: ${{ steps.project.outputs.dir }}
+          QUALITY: ${{ github.event.inputs.quality }}
+        run: |
+          set -euo pipefail
+          if [ "$QUALITY" = "draft" ]; then
+            python -m video_pipeline render "$PROJECT_DIR" \
+              --width 1280 --height 720
+          else
+            python -m video_pipeline render "$PROJECT_DIR"
+          fi
+
+      - name: Stage artifact files
+        env:
+          PROJECT_DIR: ${{ steps.project.outputs.dir }}
+        run: |
+          set -euo pipefail
+          python tools/stage_artifacts.py "$PROJECT_DIR" \
+            --artifact-dir "$RUNNER_TEMP/artifacts" \
+            --artifact-name "$ARTIFACT_NAME"
+
+      # Artifact storage is independent of Drive: this runs even when no Drive
+      # credentials exist, and is skipped automatically on render/validation
+      # failure.
+      - name: Upload final-video artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ runner.temp }}/artifacts/
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+          if-no-files-found: error
+
+      # Optional Drive publication. Skipped (not failed) when unconfigured.
+      - name: Upload to Google Drive
+        if: ${{ inputs.upload_to_drive && steps.creds.outputs.available == 'true' }}
+        env:
+          PROJECT_DIR: ${{ steps.project.outputs.dir }}
+        run: |
+          set -euo pipefail
+          export GOOGLE_DRIVE_CREDENTIALS="$RUNNER_TEMP/drive.json"
+          python -m video_pipeline upload "$PROJECT_DIR"
+
+      - name: Remove credentials
+        if: always()
+        run: rm -f "$RUNNER_TEMP/drive.json" || true
+
+      - name: Summary
+        if: always()
+        env:
+          PROJECT_DIR: ${{ steps.project.outputs.dir }}
+        run: |
+          set -euo pipefail
+          python tools/summary.py \
+            "$PROJECT_DIR/output/diagnostics/validation.json" "$PROJECT_DIR" \
+            >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failure-diagnostics
+          path: |
+            ${{ steps.project.outputs.dir }}/output/diagnostics/
+            ${{ steps.project.outputs.dir }}/build/logs/
+          retention-days: 14
+          if-no-files-found: ignore

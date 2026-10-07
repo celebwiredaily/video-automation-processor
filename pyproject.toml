@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "video-pipeline"
+version = "1.0.0"
+description = "Deterministic Python + FFmpeg pipeline for narrated YouTube videos"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "PyYAML>=6,<7",
+]
+
+[project.optional-dependencies]
+# Caption timing from a voiceover. The renderer does not need this; it only
+# produces captions/segments.json.
+transcribe = ["faster-whisper>=1.0"]
+# Authenticated Google Drive access. Public folders only need an API key.
+drive = ["google-api-python-client>=2.100", "google-auth>=2.20"]
+dev = ["pytest>=7.4"]
+
+[project.scripts]
+video_pipeline = "video_pipeline.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["video_pipeline*"]
+
+[tool.setuptools.package-data]
+# The caption font must ship with the package; runners have no Montserrat.
+video_pipeline = ["assets/fonts/*.ttf", "assets/fonts/*.otf", "assets/fonts/*.txt"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]

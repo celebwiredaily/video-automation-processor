@@ -1,0 +1,137 @@
+name: Render project
+
+on:
+  workflow_dispatch:
+    inputs:
+      project:
+        description: "Project directory under projects/ (e.g. my-video)"
+        required: true
+        type: string
+      quality:
+        description: "Render quality"
+        required: false
+        default: final
+        type: choice
+        options: [final, draft]
+
+permissions:
+  contents: read
+
+# Artefact retention for the published video.
+env:
+  ARTIFACT_RETENTION_DAYS: "7"
+  ARTIFACT_NAME: final-video
+
+# Do not cancel a long render halfway; let it finish.
+concurrency:
+  group: render-${{ github.event.inputs.project }}
+  cancel-in-progress: false
+
+jobs:
+  render:
+    name: Render ${{ github.event.inputs.project }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          lfs: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core
+
+      - name: Install project
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      # The project name is a workflow input, so it is passed as an
+      # environment variable and validated to be a plain directory name.
+      # It is never interpolated into a shell command.
+      - name: Resolve project directory
+        id: project
+        env:
+          PROJECT_INPUT: ${{ github.event.inputs.project }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$PROJECT_INPUT" =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ ]]; then
+            echo "::error::invalid project path"
+            exit 1
+          fi
+          CANDIDATE="projects/${PROJECT_INPUT}"
+          if [[ ! -f "$CANDIDATE/project.yaml" ]]; then
+            echo "::error::$CANDIDATE/project.yaml not found"
+            echo "Available projects:"
+            ls -1 projects 2>/dev/null || echo "(none committed)"
+            exit 1
+          fi
+          echo "dir=$CANDIDATE" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch assets
+        env:
+          PROJECT_DIR: ${{ steps.project.outputs.dir }}
+        run: python -m video_pipeline fetch "$PROJECT_DIR" || true
+
+      # Render and validate. Validation inspects decoded frames from the
+      # rendered MP4; a non-zero exit here means nothing is published.
+      - name: Render and validate
+        env:
+          PROJECT_DIR: ${{ steps.project.outputs.dir }}
+          QUALITY: ${{ github.event.inputs.quality }}
+        run: |
+          set -euo pipefail
+          if [ "$QUALITY" = "draft" ]; then
+            python -m video_pipeline render "$PROJECT_DIR" \
+              --width 1280 --height 720
+          else
+            python -m video_pipeline render "$PROJECT_DIR"
+          fi
+
+      - name: Stage artifact files
+        env:
+          PROJECT_DIR: ${{ steps.project.outputs.dir }}
+        run: |
+          set -euo pipefail
+          python tools/stage_artifacts.py "$PROJECT_DIR" \
+            --artifact-dir "$RUNNER_TEMP/artifacts" \
+            --artifact-name "$ARTIFACT_NAME"
+
+      - name: Upload final-video artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ runner.temp }}/artifacts/
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+          if-no-files-found: error
+
+      - name: Summary
+        if: always()
+        env:
+          PROJECT_DIR: ${{ steps.project.outputs.dir }}
+        run: |
+          set -euo pipefail
+          python tools/summary.py \
+            "$PROJECT_DIR/output/diagnostics/validation.json" "$PROJECT_DIR" \
+            >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failure-diagnostics
+          path: |
+            ${{ steps.project.outputs.dir }}/output/diagnostics/
+            ${{ steps.project.outputs.dir }}/build/logs/
+          retention-days: 14
+          if-no-files-found: ignore

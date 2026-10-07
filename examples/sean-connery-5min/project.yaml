@@ -1,0 +1,19 @@
+name: sean-connery-5min
+script: script.md
+voiceover: audio/voiceover.wav
+captions:
+  file: captions/segments.json
+output_dir: output
+work_dir: build
+storage:
+  # Rendered locally from assets already on disk. To publish the validated
+  # result to Drive instead, use:
+  #
+  #   backend: google_drive
+  #   input_folder_id:  "1WHyz5VyisoUtBe_PKAYX3up0GvZno_cO"
+  #   output_folder_id: "1WHyz5VyisoUtBe_PKAYX3up0GvZno_cO"
+  #
+  # then: python -m video_pipeline render examples/sean-connery-5min --upload
+  # with GOOGLE_DRIVE_CREDENTIALS pointing at a service-account JSON file.
+  backend: local
+  destination: assets
