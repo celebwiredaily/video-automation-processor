@@ -1,6 +1,7 @@
 name: Render project
 
-on:
+# Quoted: see the note in ci.yml. Identical to GitHub's own parsing.
+"on":
   workflow_dispatch:
     inputs:
       project:

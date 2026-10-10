@@ -14,11 +14,15 @@ from pathlib import Path
 
 def main(argv: list[str]) -> int:
     if len(argv) < 2:
-        print("usage: summary.py <validation.json> [project-label]", file=sys.stderr)
+        print(
+            "usage: summary.py <validation.json> [project-label] [duration-report.json]",
+            file=sys.stderr,
+        )
         return 2
 
     report_path = Path(argv[1])
     label = argv[2] if len(argv) > 2 else report_path.parent.parent.name
+    duration_path = Path(argv[3]) if len(argv) > 3 else None
 
     if not report_path.is_file():
         print(f"## Render summary: {label}\n\n- validation.json not produced")
@@ -59,6 +63,31 @@ def main(argv: list[str]) -> int:
         print("### Warnings")
         for item in warnings:
             print(f"- {item}")
+
+    # Strict duration / frame-count measurement, when one was produced. This is
+    # the number that decides whether the render is actually 300.000s.
+    if duration_path is not None and duration_path.is_file():
+        duration = json.loads(duration_path.read_text(encoding="utf-8"))
+        state = "PASS" if duration.get("ok") else "FAIL"
+        print()
+        print(f"### Strict duration: {state}")
+        print()
+        print(
+            f"- target: {duration.get('target_seconds')}s, measured: "
+            f"{duration.get('measured_duration')}s "
+            f"(delta {duration.get('measured_delta')}s, tolerance "
+            f"{duration.get('tolerance_seconds')}s)"
+        )
+        print(
+            f"- frames: {duration.get('frames')} decoded, expected "
+            f"{duration.get('expected_frames')} at {duration.get('fps')}fps"
+        )
+        for check in duration.get("checks") or []:
+            flag = "ok" if check.get("ok") else "FAILED"
+            print(f"- {check.get('name')}: {check.get('measured')} ({flag})")
+    elif duration_path is not None:
+        print()
+        print("### Strict duration\n\n- duration report not produced")
     return 0
 
 

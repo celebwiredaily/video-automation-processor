@@ -10,6 +10,7 @@ that the workflows are wired to upload exactly when they should.
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -267,6 +268,184 @@ def test_workflows_declare_read_only_permissions(path):
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
     assert data.get("permissions") == {"contents": "read"}, (
         f"{path.name} must not request write permissions"
+    )
+
+
+@pytest.mark.parametrize("path", WORKFLOWS, ids=lambda p: p.name)
+def test_workflow_on_key_is_not_parsed_as_boolean(path):
+    """`on:` must be quoted, or YAML 1.1 turns it into the boolean True.
+
+    GitHub accepts both spellings, but any local tooling that reads these files
+    with PyYAML sees `True` as the key and silently misses the triggers.
+    """
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert "on" in data, f"{path.name}: expected a quoted 'on' key, got {list(data)}"
+    assert True not in data, f"{path.name}: 'on' was coerced to the boolean True"
+
+
+def _triggers(workflow: str) -> dict:
+    data = yaml.safe_load((ROOT / ".github" / "workflows" / workflow).read_text())
+    return data["on"] or {}
+
+
+@pytest.mark.parametrize(
+    "workflow", ["ci.yml", "render.yml", "render-upload.yml"]
+)
+def test_every_workflow_supports_manual_execution(workflow):
+    """Each workflow can be started by hand from the Actions tab."""
+    assert "workflow_dispatch" in _triggers(workflow), (
+        f"{workflow} must allow workflow_dispatch"
+    )
+
+
+def test_ci_keeps_its_existing_triggers_alongside_manual():
+    triggers = _triggers("ci.yml")
+    assert "workflow_dispatch" in triggers
+    assert "push" in triggers, "adding workflow_dispatch must not remove push"
+    assert "pull_request" in triggers, "adding workflow_dispatch must not remove pull_request"
+    assert triggers["push"]["branches"] == ["**"]
+    assert triggers["push"]["paths-ignore"] == ["**/*.md", "legacy/**"]
+
+
+def test_drive_workflow_stays_dispatch_only():
+    """Drive publishing must never fire automatically."""
+    triggers = _triggers("render-upload.yml")
+    assert set(triggers) == {"workflow_dispatch"}, (
+        "the Drive publisher must not run on push or pull_request"
+    )
+    inputs = triggers["workflow_dispatch"].get("inputs") or {}
+    assert "upload_to_drive" in inputs
+    assert inputs["upload_to_drive"].get("default") is True
+
+
+def test_dispatch_only_workflows_need_no_required_inputs_in_ci():
+    """render.yml must not be able to require a project the CI job lacks."""
+    triggers = _triggers("render.yml")
+    assert set(triggers) == {"workflow_dispatch"}
+    inputs = triggers["workflow_dispatch"].get("inputs") or {}
+    assert inputs["project"]["required"] is True
+
+
+# ------------------------------------------------- automatic trimming in CI
+
+
+def _step_names(workflow: str) -> list[str]:
+    return [s.get("name") or s.get("uses") or "" for s in _steps(workflow)]
+
+
+def test_ci_trims_automatically_without_manual_input():
+    """No step may ask a human to supply a pre-trimmed 5-minute file."""
+    text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert "prepare-source" in text, "CI must prepare/trim the source itself"
+    for forbidden in ("manually trim", "manual trim", "upload your own"):
+        assert forbidden.lower() not in text.lower()
+
+
+def test_ci_pipeline_order_is_trim_render_validate_upload():
+    """source -> trim -> render -> validate -> upload, in that order."""
+    names = _step_names("ci.yml")
+    trim_at = next(i for i, n in enumerate(names) if "trim to 5 minutes" in n)
+    render_at = next(i for i, n in enumerate(names) if n == "Render the trimmed source")
+    verify_at = next(i for i, n in enumerate(names) if "Verify strict" in n)
+    stage_at = names.index("Stage artifact files")
+    upload_at = next(
+        i for i, s in enumerate(_steps("ci.yml"))
+        if str(s.get("uses", "")).startswith("actions/upload-artifact")
+        and _resolve(s.get("with", {}).get("name"), "ci.yml") == "final-video"
+    )
+    assert trim_at < render_at < verify_at < stage_at < upload_at
+
+
+def test_ci_verifies_the_strict_duration_with_the_rendered_file():
+    """The duration check must read final.mp4 and target 300s at 30fps."""
+    step = next(
+        s for s in _steps("ci.yml") if "Verify strict" in (s.get("name") or "")
+    )
+    run = step["run"]
+    assert "verify-duration" in run
+    assert "final.mp4" in run, "the check must inspect the rendered video"
+    assert "--seconds 300" in run
+    assert "--fps 30" in run
+
+
+def test_ci_requires_no_cloud_storage_credentials():
+    text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    for forbidden in (
+        "GOOGLE_DRIVE_CREDENTIALS",
+        "GOOGLE_API_KEY",
+        "google-api-python-client",
+        "google-auth",
+        "rclone",
+        "aws",
+    ):
+        assert forbidden not in text, f"CI must not require {forbidden!r}"
+
+
+def test_failed_trim_stops_before_the_artifact_upload():
+    """The trim step must not be tolerant of failure."""
+    steps = _steps("ci.yml")
+    trim_index = next(
+        i for i, s in enumerate(steps)
+        if "trim to 5 minutes" in (s.get("name") or "")
+    )
+    trim_run = steps[trim_index].get("run", "")
+    assert "|| true" not in trim_run, (
+        "a failed trim must fail the job, not be ignored"
+    )
+    assert "continue-on-error" not in steps[trim_index]
+
+    upload_index = next(
+        i for i, s in enumerate(steps)
+        if str(s.get("uses", "")).startswith("actions/upload-artifact")
+        and _resolve(s.get("with", {}).get("name"), "ci.yml") == "final-video"
+    )
+    assert trim_index < upload_index
+    assert "if" not in steps[upload_index], (
+        "the final-video upload must not be forced to run after a failure"
+    )
+
+
+def test_duration_verification_precedes_the_artifact_upload():
+    names = _step_names("ci.yml")
+    verify_at = next(i for i, n in enumerate(names) if "Verify strict" in n)
+    stage_at = names.index("Stage artifact files")
+    assert verify_at < stage_at, (
+        "a duration failure must prevent staging and therefore the upload"
+    )
+
+
+def test_duration_report_ships_in_the_artifact():
+    """The measured duration evidence should travel with the artifact."""
+    text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert "duration-report.json" in text
+
+
+def test_generated_video_is_never_committed():
+    """The trimmed clip and the source must both stay out of git."""
+    for generated in (
+        "build/ci-source-project/build/source/source_300s.mp4",
+        "build/ci-source-project/assets/source.mp4",
+        "build/ci-source-project/output/final.mp4",
+    ):
+        result = subprocess.run(
+            ["git", "check-ignore", "-q", generated],
+            cwd=ROOT,
+            check=False,
+        )
+        assert result.returncode == 0, f"{generated} must be git-ignored"
+
+
+def test_no_video_files_are_tracked_by_git():
+    """A committed .mp4 would bloat the repo and defeat the artifact gate."""
+    tracked = subprocess.run(
+        ["git", "ls-files", "*.mp4", "*.mov", "*.mkv", "*.webm"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert tracked.stdout.strip() == "", (
+        f"video files are tracked in git: {tracked.stdout.strip()}"
     )
 
 

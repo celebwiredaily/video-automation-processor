@@ -2,7 +2,9 @@ name: Render and upload to Drive
 
 # Separate from CI on purpose: normal CI never requires Google credentials and
 # never contacts Drive. This workflow is the optional Drive publisher.
-on:
+#
+# Quoted: see the note in ci.yml. Identical to GitHub's own parsing.
+"on":
   workflow_dispatch:
     inputs:
       project:

@@ -1,6 +1,9 @@
 name: CI
 
-on:
+# Quoted so YAML 1.1 parsers (PyYAML among them) read the key as the string
+# "on" instead of coercing it to the boolean True. GitHub Actions treats both
+# forms identically; quoting only keeps local tooling honest.
+"on":
   push:
     branches: ["**"]
     paths-ignore:
@@ -57,19 +60,49 @@ jobs:
       - name: Unit tests (no media)
         run: pytest -q tests/test_captions.py tests/test_config_timeline.py tests/test_storage.py tests/test_upload.py
 
+      - name: Trimming + strict duration tests (real MP4s)
+        run: pytest -q tests/test_trim.py
+
       - name: Render + integration tests (real MP4s, frame inspection)
         run: pytest -q tests/test_render_integration.py tests/test_media_types.py
 
-      - name: Deterministic render test
+      - name: Prepare the deterministic test project
+        run: python -m video_pipeline prepare-test build/ci-project
+
+      # Nothing here supplies a hand-cut 5-minute file. `prepare-source`
+      # locates the source, probes it with FFprobe, and cuts exactly 300s from
+      # 00:00:00 into a generated working directory. The default generated
+      # source is 480s (8 minutes), so the longer-source path is the one that
+      # actually runs.
+      - name: Prepare source and trim to 5 minutes
+        env:
+          TARGET_SECONDS: "300"
         run: |
-          python -m video_pipeline prepare-test build/ci-project
-          python -m video_pipeline render build/ci-project
+          python -m video_pipeline prepare-source build/ci-source-project \
+            --seconds "$TARGET_SECONDS" --fps 30 \
+            --report build/ci-source-project/output/diagnostics/trim-report.json
+
+      - name: Render the trimmed source
+        run: python -m video_pipeline render build/ci-source-project
+
+      # Measures the rendered file with FFprobe: container duration, decoded
+      # frame count (9000 at 30fps) and per-stream durations. A render that is
+      # not exactly 300.000s fails here, before anything can be published.
+      - name: Verify strict 300.000s duration
+        run: |
+          python -m video_pipeline verify-duration \
+            build/ci-source-project/output/final.mp4 \
+            --seconds 300 --fps 30 \
+            --report build/ci-source-project/output/diagnostics/duration-report.json
+
+      - name: Deterministic render test
+        run: python -m video_pipeline render build/ci-project
 
       # Validation is the gate. Staging refuses to run unless validation.json
       # reports ok=true, so a bad render can never be published.
       - name: Stage artifact files
         run: |
-          python tools/stage_artifacts.py build/ci-project \
+          python tools/stage_artifacts.py build/ci-source-project \
             --artifact-dir "$RUNNER_TEMP/artifacts" \
             --artifact-name "$ARTIFACT_NAME"
 
@@ -86,10 +119,11 @@ jobs:
       - name: Artifact summary
         if: always()
         env:
-          PROJECT_DIR: build/ci-project
+          PROJECT_DIR: build/ci-source-project
         run: |
           python tools/summary.py \
             "$PROJECT_DIR/output/diagnostics/validation.json" "$PROJECT_DIR" \
+            "$PROJECT_DIR/output/diagnostics/duration-report.json" \
             >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload diagnostics on failure
@@ -98,6 +132,8 @@ jobs:
         with:
           name: failure-diagnostics
           path: |
+            build/ci-source-project/output/diagnostics/
+            build/ci-source-project/build/logs/
             build/ci-project/output/diagnostics/
             build/ci-project/build/logs/
           retention-days: 7

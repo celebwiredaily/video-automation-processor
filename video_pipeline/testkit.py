@@ -126,6 +126,53 @@ def make_image(
     return path
 
 
+def make_source(
+    path: Path,
+    *,
+    seconds: float,
+    width: int = 1280,
+    height: int = 720,
+    fps: int = 30,
+    audio: bool = True,
+    audio_tone: int = 300,
+    source_pattern: str = "testsrc2",
+) -> Path:
+    """A long source clip to exercise the trimming path.
+
+    Deliberately *moving* (``testsrc2`` by default): a static pattern such as
+    ``smptebars`` looks identical at every timestamp, so a test using it could
+    not tell a correctly trimmed segment from the untrimmed original - the
+    comparison would pass for the wrong reason.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    if source_pattern == "smptebars":
+        video_source = f"smptebars=duration={seconds}:size={width}x{height}:rate={fps}"
+    else:
+        video_source = f"testsrc2=duration={seconds}:size={width}x{height}:rate={fps}"
+
+    args = [
+        ffmpeg.ffmpeg_bin(), "-y", "-hide_banner", "-nostdin", "-loglevel", "error",
+        "-f", "lavfi", "-i", video_source,
+    ]
+    if audio:
+        args += [
+            "-f", "lavfi", "-i",
+            f"sine=frequency={audio_tone}:duration={seconds}:sample_rate=48000",
+        ]
+    args += [
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "24",
+        "-pix_fmt", "yuv420p", "-r", str(fps),
+    ]
+    if audio:
+        args += ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2", "-shortest"]
+    else:
+        args += ["-an"]
+    args += [str(path)]
+    _run(args, stage="make_source")
+    return path
+
+
 def make_voiceover(
     path: Path,
     *,

@@ -7,6 +7,9 @@
     python -m video_pipeline upload  <project> [--video PATH]
     python -m video_pipeline inspect <project>
     python -m video_pipeline probe   <asset>
+    python -m video_pipeline trim    <project> [--source PATH] [--seconds 300]
+    python -m video_pipeline prepare-source <dir> [--seconds 300]
+    python -m video_pipeline verify-duration <video> [--seconds 300]
     python -m video_pipeline prepare-test <dir>
 
 Exit codes
@@ -594,6 +597,133 @@ def cmd_probe(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------- trim
+
+
+def cmd_trim(args: argparse.Namespace) -> int:
+    """Inspect a source with FFprobe and cut the configured duration from it."""
+    from . import trim as trim_mod
+
+    project_root = Path(args.project)
+    seconds = float(args.seconds)
+    fps = int(args.fps or 0)
+
+    try:
+        source = trim_mod.locate_source(project_root, args.source)
+        info = trim_mod.probe_media(source)
+        config = load_project(project_root, validate_timeline=False).config if (
+            (project_root / "project.yaml").is_file()
+            or (project_root / "project.yml").is_file()
+        ) else None
+        if not fps:
+            fps = config.output.fps if config else 30
+
+        dest = (
+            Path(args.out_dir)
+            if args.out_dir
+            else _trim_work_dir(project_root) / trim_mod.SOURCE_DIRNAME
+        )
+        result = trim_mod.prepare_segment(
+            source, dest, seconds=seconds, fps=fps, config=config
+        )
+    except PipelineError as exc:
+        print(str(exc), file=sys.stderr)
+        return exc.exit_code
+
+    print(f"Source      : {result.source}")
+    print(f"  probed    : {info.width}x{info.height} @ {info.fps:.3f}fps, "
+          f"{info.duration:.3f}s, "
+          f"audio={'yes' if info.has_audio else 'no'}")
+    print(f"Target      : {result.target_seconds:.3f}s @ {result.fps:.0f}fps")
+    print(f"Action      : {result.action}")
+    print(f"Prepared    : {result.clip}")
+    print(f"  measured  : {result.clip_duration:.6f}s, {result.frames} frames, "
+          f"{result.clip_width}x{result.clip_height}, "
+          f"audio={'yes' if result.has_audio else 'no'}")
+    for warning in result.warnings:
+        print(f"  note: {warning}")
+
+    if args.report:
+        path = trim_mod.write_report(result.to_dict(), Path(args.report))
+        print(f"Report      : {path}")
+    return 0
+
+
+def _trim_work_dir(project_root: Path) -> Path:
+    if (project_root / "project.yaml").is_file() or (
+        project_root / "project.yml"
+    ).is_file():
+        try:
+            return load_project(project_root, validate_timeline=False).work_dir
+        except PipelineError:
+            pass
+    return project_root / "build"
+
+
+def cmd_prepare_source(args: argparse.Namespace) -> int:
+    """Build a renderable project from a source video, trimmed automatically."""
+    from . import trim as trim_mod
+
+    source = Path(args.source) if args.source else None
+    directory = Path(args.dir)
+    try:
+        created, result = trim_mod.build_source_project(
+            directory,
+            source=source,
+            seconds=float(args.seconds),
+            fps=int(args.fps),
+        )
+    except PipelineError as exc:
+        print(str(exc), file=sys.stderr)
+        return exc.exit_code
+
+    print(f"Source      : {result.source} ({result.source_duration:.3f}s)")
+    print(f"Action      : {result.action}")
+    print(f"Prepared    : {result.clip}")
+    print(f"  measured  : {result.clip_duration:.6f}s, {result.frames} frames, "
+          f"{result.clip_width}x{result.clip_height}")
+    for warning in result.warnings:
+        print(f"  note: {warning}")
+    if args.report:
+        path = trim_mod.write_report(result.to_dict(), Path(args.report))
+        print(f"Report      : {path}")
+    print(f"Project     : {created}")
+    print(f"  render    : python -m video_pipeline render {created}")
+    return 0
+
+
+def cmd_verify_duration(args: argparse.Namespace) -> int:
+    """Strictly verify a rendered file's measured duration and frame count."""
+    from . import trim as trim_mod
+
+    try:
+        report = trim_mod.enforce_final(
+            Path(args.path),
+            target_seconds=float(args.seconds),
+            fps=int(args.fps),
+            tolerance_seconds=args.tolerance,
+            require_audio=not args.no_audio,
+        )
+    except PipelineError as exc:
+        print(str(exc), file=sys.stderr)
+        return exc.exit_code
+
+    print(f"[PASS] {report['path']}")
+    print(f"  duration  : {report['measured_duration']:.6f}s "
+          f"(target {report['target_seconds']:.3f}s, "
+          f"delta {report['measured_delta']:+.6f}s, "
+          f"tolerance {report['tolerance_seconds']:.6f}s)")
+    print(f"  frames    : {report['frames']} "
+          f"(expected {report['expected_frames']} at {report['fps']:.0f}fps)")
+    print(f"  audio     : {report['audio_duration']:.6f}s"
+          if report["has_audio"] else "  audio     : none")
+
+    if args.report:
+        path = trim_mod.write_report(report, Path(args.report))
+        print(f"  report    : {path}")
+    return 0
+
+
 # --------------------------------------------------------------- prepare-test
 
 
@@ -674,6 +804,47 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("probe", help="Probe one media file")
     p.add_argument("path")
     p.set_defaults(func=cmd_probe)
+
+    p = sub.add_parser(
+        "trim",
+        help="Cut exactly --seconds from the start of a source video (FFprobe-checked)",
+    )
+    p.add_argument("project", help="Project directory, or a directory holding the source")
+    p.add_argument("--source", default=None, help="Override the source video path")
+    p.add_argument("--seconds", type=float, default=300.0,
+                   help="Target duration of the prepared segment (default: 300)")
+    p.add_argument("--fps", type=int, default=None,
+                   help="Frame rate to conform the segment to (default: project fps)")
+    p.add_argument("--out-dir", default=None,
+                   help="Where to write the prepared segment (default: <work_dir>/source)")
+    p.add_argument("--report", default=None, help="Write a JSON report here")
+    p.set_defaults(func=cmd_trim)
+
+    p = sub.add_parser(
+        "prepare-source",
+        help="Build a project whose only visual source is an automatically trimmed segment",
+    )
+    p.add_argument("dir", help="Project directory to create")
+    p.add_argument("--source", default=None,
+                   help="Source video (default: a generated 1.6x-length source)")
+    p.add_argument("--seconds", type=float, default=300.0)
+    p.add_argument("--fps", type=int, default=30)
+    p.add_argument("--report", default=None, help="Write a JSON trim report here")
+    p.set_defaults(func=cmd_prepare_source)
+
+    p = sub.add_parser(
+        "verify-duration",
+        help="Strictly verify a rendered file's duration and decoded frame count",
+    )
+    p.add_argument("path")
+    p.add_argument("--seconds", type=float, default=300.0)
+    p.add_argument("--fps", type=int, default=30)
+    p.add_argument("--tolerance", type=float, default=None,
+                   help="Duration tolerance in seconds (default: one frame period)")
+    p.add_argument("--no-audio", action="store_true",
+                   help="Do not require an audio stream")
+    p.add_argument("--report", default=None, help="Write a JSON report here")
+    p.set_defaults(func=cmd_verify_duration)
 
     p = sub.add_parser("prepare-test", help="Generate a deterministic synthetic project")
     p.add_argument("dir")
